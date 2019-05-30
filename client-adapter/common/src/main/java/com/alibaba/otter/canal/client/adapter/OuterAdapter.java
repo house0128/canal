@@ -8,6 +8,7 @@ import com.alibaba.otter.canal.client.adapter.support.Dml;
 import com.alibaba.otter.canal.client.adapter.support.EtlResult;
 import com.alibaba.otter.canal.client.adapter.support.OuterAdapterConfig;
 import com.alibaba.otter.canal.client.adapter.support.SPI;
+import org.omg.CORBA.Environment;
 
 /**
  * 外部适配器接口
@@ -22,9 +23,8 @@ public interface OuterAdapter {
      * 外部适配器初始化接口
      *
      * @param configuration 外部适配器配置信息
-     * @param envProperties 环境变量的配置属性
      */
-    void init(OuterAdapterConfig configuration, Properties envProperties);
+    void init(OuterAdapterConfig configuration, Properties environment);
 
     /**
      * 往适配器中同步数据
@@ -45,6 +45,31 @@ public interface OuterAdapter {
      * @param params etl筛选条件
      */
     default EtlResult etl(String task, List<String> params) {
+        throw new UnsupportedOperationException("unsupported operation");
+    }
+
+    //---------2019.3.7  leizheng4修改-------------
+    /**
+     * Etl操作
+     *
+     * @param task 任务名, 对应配置名
+     * @param sql sql执行的语句
+     *@param isNeedDelete 是否要反查es删除
+     */
+    default EtlResult etlEx(String task, String sql,boolean isNeedDelete) {
+        throw new UnsupportedOperationException("unsupported operation");
+    }
+
+    //---------2019.3.15  leizheng4修改-------------
+    /**
+     *
+     * @param task 任务名, 对应配置名
+     * @param sql sql执行的语句
+     * @param isNeedDelete 是否要反查es删除
+     * @param orderByParam 插入的排序字段
+     * @return
+     */
+    default EtlResult etlOrder(String task, String sql,boolean isNeedDelete,String orderByParam) {
         throw new UnsupportedOperationException("unsupported operation");
     }
 

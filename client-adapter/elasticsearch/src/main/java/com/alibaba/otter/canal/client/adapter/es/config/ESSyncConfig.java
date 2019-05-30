@@ -1,9 +1,6 @@
 package com.alibaba.otter.canal.client.adapter.es.config;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * ES 映射配置
@@ -85,7 +82,7 @@ public class ESSyncConfig {
         private String              _id;
         private boolean             upsert          = false;
         private String              pk;
-        // private String parent;
+        private String parent;
         private String              sql;
         // 对象字段, 例: objFields:
         // - _labels: array:;
@@ -97,6 +94,12 @@ public class ESSyncConfig {
         private Long                syncInterval;                           // 同步时间间隔
 
         private SchemaItem          schemaItem;                             // sql解析结果模型
+
+        private boolean          optimisticLockReverseSearch =true;                    //乐观锁是否反查，true反查，false等待乐观锁
+
+        private boolean ignoreRightInsert =false;                           //是否忽略右边新增，默认不忽略
+
+        private Map<String,String> threadKeys = new HashMap<>();           //数据表的hash字段
 
         public String get_index() {
             return _index;
@@ -200,6 +203,38 @@ public class ESSyncConfig {
 
         public void setSchemaItem(SchemaItem schemaItem) {
             this.schemaItem = schemaItem;
+        }
+
+        public String getParent() {
+            return parent;
+        }
+
+        public void setParent(String parent) {
+            this.parent = parent;
+        }
+
+        public boolean isOptimisticLockReverseSearch() {
+            return optimisticLockReverseSearch;
+        }
+
+        public void setOptimisticLockReverseSearch(boolean optimisticLockReverseSearch) {
+            this.optimisticLockReverseSearch = optimisticLockReverseSearch;
+        }
+
+        public boolean isIgnoreRightInsert() {
+            return ignoreRightInsert;
+        }
+
+        public void setIgnoreRightInsert(boolean ignoreRightInsert) {
+            this.ignoreRightInsert = ignoreRightInsert;
+        }
+
+        public Map<String, String> getThreadKeys() {
+            return threadKeys;
+        }
+
+        public void setThreadKeys(Map<String, String> threadKeys) {
+            this.threadKeys = threadKeys;
         }
     }
 }

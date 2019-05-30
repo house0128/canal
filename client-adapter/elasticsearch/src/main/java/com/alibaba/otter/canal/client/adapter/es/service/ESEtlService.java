@@ -21,10 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -52,7 +49,7 @@ public class ESEtlService {
         this.config = config;
     }
 
-    public EtlResult importData(List<String> params) {
+    public EtlResult importData(List<String> params, boolean bulk) {
         EtlResult etlResult = new EtlResult();
         AtomicLong impCount = new AtomicLong();
         List<String> errMsg = new ArrayList<>();
@@ -94,49 +91,54 @@ public class ESEtlService {
                 logger.debug("etl sql : {}", mapping.getSql());
             }
 
-            // 获取总数
-            String countSql = "SELECT COUNT(1) FROM ( " + sql + ") _CNT ";
-            long cnt = (Long) ESSyncUtil.sqlRS(dataSource, countSql, rs -> {
-                Long count = null;
-                try {
-                    if (rs.next()) {
-                        count = ((Number) rs.getObject(1)).longValue();
+            if (bulk) {
+                // 获取总数
+                String countSql = "SELECT COUNT(1) FROM ( " + sql + ") _CNT ";
+                long cnt = (Long) ESSyncUtil.sqlRS(dataSource, countSql, rs -> {
+                    Long count = null;
+                    try {
+                        if (rs.next()) {
+                            count = ((Number) rs.getObject(1)).longValue();
+                        }
+                    } catch (Exception e) {
+                        logger.error(e.getMessage(), e);
                     }
-                } catch (Exception e) {
-                    logger.error(e.getMessage(), e);
-                }
-                return count == null ? 0L : count;
-            });
+                    return count == null ? 0L : count;
+                });
 
-            // 当大于1万条记录时开启多线程
-            if (cnt >= 10000) {
-                int threadCount = 3; // 从配置读取默认为3
-                long perThreadCnt = cnt / threadCount;
-                ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-                List<Future<Boolean>> futures = new ArrayList<>(threadCount);
-                for (int i = 0; i < threadCount; i++) {
-                    long offset = i * perThreadCnt;
-                    Long size = null;
-                    if (i != threadCount - 1) {
-                        size = perThreadCnt;
+                // 当大于1万条记录时开启多线程
+                if (cnt >= 10000) {
+                    int threadCount = 3; // TODO 从配置读取默认为3
+                    long perThreadCnt = cnt / threadCount;
+                    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+                    List<Future<Boolean>> futures = new ArrayList<>(threadCount);
+                    for (int i = 0; i < threadCount; i++) {
+                        long offset = i * perThreadCnt;
+                        Long size = null;
+                        if (i != threadCount - 1) {
+                            size = perThreadCnt;
+                        }
+                        String sqlFinal;
+                        if (size != null) {
+                            sqlFinal = sql + " LIMIT " + offset + "," + size;
+                        } else {
+                            sqlFinal = sql + " LIMIT " + offset + "," + cnt;
+                        }
+                        Future<Boolean> future = executor
+                                .submit(() -> executeSqlImport(dataSource, sqlFinal, mapping, impCount, errMsg));
+                        futures.add(future);
                     }
-                    String sqlFinal;
-                    if (size != null) {
-                        sqlFinal = sql + " LIMIT " + offset + "," + size;
-                    } else {
-                        sqlFinal = sql + " LIMIT " + offset + "," + cnt;
+
+                    for (Future<Boolean> future : futures) {
+                        future.get();
                     }
-                    Future<Boolean> future = executor
-                        .submit(() -> executeSqlImport(dataSource, sqlFinal, mapping, impCount, errMsg));
-                    futures.add(future);
-                }
 
-                for (Future<Boolean> future : futures) {
-                    future.get();
+                    executor.shutdown();
+                } else {
+                    executeSqlImport(dataSource, sql, mapping, impCount, errMsg);
                 }
-
-                executor.shutdown();
             } else {
+                logger.info("自动ETL，无需统计记录总条数，直接进行ETL, index: {}", esIndex);
                 executeSqlImport(dataSource, sql, mapping, impCount, errMsg);
             }
 
@@ -154,7 +156,7 @@ public class ESEtlService {
         return etlResult;
     }
 
-    private void processFailBulkResponse(BulkResponse bulkResponse) {
+    private void processFailBulkResponse(BulkResponse bulkResponse, boolean hasParent) {
         for (BulkItemResponse response : bulkResponse.getItems()) {
             if (!response.isFailed()) {
                 continue;
@@ -197,48 +199,58 @@ public class ESEtlService {
                         }
                         Object idVal = null;
                         if (mapping.get_id() != null) {
+                            //start-------2019.3.7  leizheng4修改--------
+                            //idVal = rs.getObject(mapping.get_id());  idVal= BigInter 报错
                             idVal = esFieldData.get(mapping.get_id());
+                            //end
                         }
 
                         if (idVal != null) {
-                            if (mapping.isUpsert()) {
+                            if (mapping.getParent() == null) {
                                 bulkRequestBuilder.add(transportClient
-                                    .prepareUpdate(mapping.get_index(), mapping.get_type(), idVal.toString())
-                                    .setDoc(esFieldData)
-                                    .setDocAsUpsert(true));
+                                        .prepareIndex(mapping.get_index(), mapping.get_type(), idVal.toString())
+                                        .setSource(esFieldData));
                             } else {
-                                bulkRequestBuilder.add(transportClient
-                                    .prepareIndex(mapping.get_index(), mapping.get_type(), idVal.toString())
-                                    .setSource(esFieldData));
+                                // ignore
                             }
                         } else {
+                            //start-----2019.3.7 leizheng4修改
+                            //idVal = rs.getObject(mapping.getPk());  idVal= BigInter 报错
                             idVal = esFieldData.get(mapping.getPk());
-                            SearchResponse response = transportClient.prepareSearch(mapping.get_index())
-                                .setTypes(mapping.get_type())
-                                .setQuery(QueryBuilders.termQuery(mapping.getPk(), idVal))
-                                .setSize(10000)
-                                .get();
-                            for (SearchHit hit : response.getHits()) {
-                                bulkRequestBuilder.add(
-                                    transportClient.prepareUpdate(mapping.get_index(), mapping.get_type(), hit.getId())
-                                        .setDoc(esFieldData));
+                            //end------------------------
+                            if (mapping.getParent() == null) {
+                                // 删除pk对应的数据
+                                SearchResponse response = transportClient.prepareSearch(mapping.get_index())
+                                        .setTypes(mapping.get_type())
+                                        .setQuery(QueryBuilders.termQuery(mapping.getPk(), idVal))
+                                        .get();
+                                for (SearchHit hit : response.getHits()) {
+                                    bulkRequestBuilder.add(transportClient
+                                            .prepareDelete(mapping.get_index(), mapping.get_type(), hit.getId()));
+                                }
+
+                                bulkRequestBuilder
+                                        .add(transportClient.prepareIndex(mapping.get_index(), mapping.get_type())
+                                                .setSource(esFieldData));
+                            } else {
+                                // ignore
                             }
                         }
 
                         if (bulkRequestBuilder.numberOfActions() % mapping.getCommitBatch() == 0
-                            && bulkRequestBuilder.numberOfActions() > 0) {
+                                && bulkRequestBuilder.numberOfActions() > 0) {
                             long esBatchBegin = System.currentTimeMillis();
                             BulkResponse rp = bulkRequestBuilder.execute().actionGet();
                             if (rp.hasFailures()) {
-                                this.processFailBulkResponse(rp);
+                                this.processFailBulkResponse(rp, Objects.nonNull(mapping.getParent()));
                             }
 
-                            if (logger.isTraceEnabled()) {
-                                logger.trace("全量数据批量导入批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
-                                    (System.currentTimeMillis() - batchBegin),
-                                    (System.currentTimeMillis() - esBatchBegin),
-                                    bulkRequestBuilder.numberOfActions(),
-                                    mapping.get_index());
+                            if (logger.isDebugEnabled()) {
+                                logger.debug("全量数据批量导入批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
+                                        (System.currentTimeMillis() - batchBegin),
+                                        (System.currentTimeMillis() - esBatchBegin),
+                                        bulkRequestBuilder.numberOfActions(),
+                                        mapping.get_index());
                             }
                             batchBegin = System.currentTimeMillis();
                             bulkRequestBuilder = transportClient.prepareBulk();
@@ -251,14 +263,14 @@ public class ESEtlService {
                         long esBatchBegin = System.currentTimeMillis();
                         BulkResponse rp = bulkRequestBuilder.execute().actionGet();
                         if (rp.hasFailures()) {
-                            this.processFailBulkResponse(rp);
+                            this.processFailBulkResponse(rp, Objects.nonNull(mapping.getParent()));
                         }
-                        if (logger.isTraceEnabled()) {
-                            logger.trace("全量数据批量导入最后批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
-                                (System.currentTimeMillis() - batchBegin),
-                                (System.currentTimeMillis() - esBatchBegin),
-                                bulkRequestBuilder.numberOfActions(),
-                                mapping.get_index());
+                        if (logger.isDebugEnabled()) {
+                            logger.debug("全量数据批量导入最后批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
+                                    (System.currentTimeMillis() - batchBegin),
+                                    (System.currentTimeMillis() - esBatchBegin),
+                                    bulkRequestBuilder.numberOfActions(),
+                                    mapping.get_index());
                         }
                     }
                 } catch (Exception e) {
@@ -269,6 +281,460 @@ public class ESEtlService {
                 return count;
             });
 
+            return true;
+        } catch (Exception e) {
+            logger.error(e.getMessage(), e);
+            return false;
+        }
+    }
+
+    //-----------2019.3.7 leizheng4修改-----------
+    private boolean executeSqlImport(DataSource ds, String sql, ESMapping mapping, AtomicLong impCount,
+                                     List<String> errMsg,boolean isNeedDelete) {
+        try {
+            ESSyncUtil.sqlRS(ds, sql, rs -> {
+                int count = 0;
+                try {
+                    BulkRequestBuilder bulkRequestBuilder = transportClient.prepareBulk();
+
+                    long batchBegin = System.currentTimeMillis();
+                    while (rs.next()) {
+                        Map<String, Object> esFieldData = new LinkedHashMap<>();
+                        for (FieldItem fieldItem : mapping.getSchemaItem().getSelectFields().values()) {
+
+                            String fieldName = fieldItem.getFieldName();
+                            if (mapping.getSkips().contains(fieldName)) {
+                                continue;
+                            }
+
+                            Object val = esTemplate.getValFromRS(mapping, rs, fieldName, fieldName);
+                            esFieldData.put(fieldName, val);
+                        }
+                        Object idVal = null;
+                        if (mapping.get_id() != null) {
+                            //idVal = rs.getObject(mapping.get_id());  idVal= BigInter 报错
+                            idVal = esFieldData.get(mapping.get_id());
+                        }
+
+                        if (idVal != null) {
+                            if (mapping.getParent() == null) {
+                                bulkRequestBuilder.add(transportClient
+                                        .prepareIndex(mapping.get_index(), mapping.get_type(), idVal.toString())
+                                        .setSource(esFieldData));
+                            } else {
+                                // ignore
+                            }
+                        } else {
+                            //idVal = rs.getObject(mapping.getPk());  idVal= BigInter 报错
+                            idVal = esFieldData.get(mapping.getPk());
+                            if (mapping.getParent() == null) {
+                                if(isNeedDelete){
+                                    // 删除pk对应的数据
+                                    SearchResponse response = transportClient.prepareSearch(mapping.get_index())
+                                            .setTypes(mapping.get_type())
+                                            .setQuery(QueryBuilders.termQuery(mapping.getPk(), idVal))
+                                            .get();
+                                    for (SearchHit hit : response.getHits()) {
+                                        bulkRequestBuilder.add(transportClient
+                                                .prepareDelete(mapping.get_index(), mapping.get_type(), hit.getId()));
+                                    }
+                                }
+
+                                bulkRequestBuilder
+                                        .add(transportClient.prepareIndex(mapping.get_index(), mapping.get_type())
+                                                .setSource(esFieldData));
+                            } else {
+                                // ignore
+                            }
+                        }
+
+                        if (bulkRequestBuilder.numberOfActions() % mapping.getCommitBatch() == 0
+                                && bulkRequestBuilder.numberOfActions() > 0) {
+                            long esBatchBegin = System.currentTimeMillis();
+                            BulkResponse rp = bulkRequestBuilder.execute().actionGet();
+                            if (rp.hasFailures()) {
+                                this.processFailBulkResponse(rp, Objects.nonNull(mapping.getParent()));
+                            }
+
+                            if (logger.isDebugEnabled()) {
+                                logger.debug("全量数据批量导入批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
+                                        (System.currentTimeMillis() - batchBegin),
+                                        (System.currentTimeMillis() - esBatchBegin),
+                                        bulkRequestBuilder.numberOfActions(),
+                                        mapping.get_index());
+                            }
+                            batchBegin = System.currentTimeMillis();
+                            bulkRequestBuilder = transportClient.prepareBulk();
+                        }
+                        count++;
+                        impCount.incrementAndGet();
+                    }
+
+                    if (bulkRequestBuilder.numberOfActions() > 0) {
+                        long esBatchBegin = System.currentTimeMillis();
+                        BulkResponse rp = bulkRequestBuilder.execute().actionGet();
+                        if (rp.hasFailures()) {
+                            this.processFailBulkResponse(rp, Objects.nonNull(mapping.getParent()));
+                        }
+                        if (logger.isDebugEnabled()) {
+                            logger.debug("全量数据批量导入最后批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
+                                    (System.currentTimeMillis() - batchBegin),
+                                    (System.currentTimeMillis() - esBatchBegin),
+                                    bulkRequestBuilder.numberOfActions(),
+                                    mapping.get_index());
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.error(e.getMessage(), e);
+                    errMsg.add(mapping.get_index() + " etl failed! ==>" + e.getMessage());
+                    throw new RuntimeException(e);
+                }
+                return count;
+            });
+
+            return true;
+        } catch (Exception e) {
+            logger.error(e.getMessage(), e);
+            return false;
+        }
+    }
+
+    //-----------2019.3.7 leizheng4修改-----------
+    public EtlResult importDataSql(String sql,boolean isNeedDelete,boolean bulk) {
+        EtlResult etlResult = new EtlResult();
+        AtomicLong impCount = new AtomicLong();
+        List<String> errMsg = new ArrayList<>();
+        String esIndex = "";
+        if (config == null) {
+            logger.warn("esSycnCofnig is null, etl go end !");
+            etlResult.setErrorMessage("esSycnCofnig is null, etl go end !");
+            return etlResult;
+        }
+
+        ESMapping mapping = config.getEsMapping();
+
+        esIndex = mapping.get_index();
+        DruidDataSource dataSource = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
+        Pattern pattern = Pattern.compile(".*:(.*)://.*/(.*)\\?.*$");
+        Matcher matcher = pattern.matcher(dataSource.getUrl());
+        if (!matcher.find()) {
+            throw new RuntimeException("Not found the schema of jdbc-url: " + config.getDataSourceKey());
+        }
+        String schema = matcher.group(2);
+
+        logger.info("etl from db: {},  to es index: {}", schema, esIndex);
+        long start = System.currentTimeMillis();
+        try {
+            if (logger.isDebugEnabled()) {
+                logger.debug("etl sql : {}", sql);
+            }
+
+            if (bulk) {
+                // 获取总数
+                String countSql = "SELECT COUNT(1) FROM ( " + sql + ") _CNT ";
+                long cnt = (Long) ESSyncUtil.sqlRS(dataSource, countSql, rs -> {
+                    Long count = null;
+                    try {
+                        if (rs.next()) {
+                            count = ((Number) rs.getObject(1)).longValue();
+                        }
+                    } catch (Exception e) {
+                        logger.error(e.getMessage(), e);
+                    }
+                    return count == null ? 0L : count;
+                });
+
+                // 当大于1万条记录时开启多线程
+                if (cnt >= 10000) {
+//                    int threadCount = 3; // TODO 从配置读取默认为3
+//                    long perThreadCnt = cnt / threadCount;
+//                    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+//                    List<Future<Boolean>> futures = new ArrayList<>(threadCount);
+//                    for (int i = 0; i < threadCount; i++) {
+//                        long offset = i * perThreadCnt;
+//                        Long size = null;
+//                        if (i != threadCount - 1) {
+//                            size = perThreadCnt;
+//                        }
+//                        String sqlFinal;
+//                        if (size != null) {
+//                            sqlFinal = sql + " LIMIT " + offset + "," + size;
+//                        } else {
+//                            sqlFinal = sql + " LIMIT " + offset + "," + cnt;
+//                        }
+//                        Future<Boolean> future = executor
+//                            .submit(() -> executeSqlImport(dataSource, sqlFinal, mapping, impCount, errMsg));
+//                        futures.add(future);
+//                    }
+
+                    //---------------修改后----------------
+                    int pageCount =10000;
+                    int threadCount = 10; // TODO 从配置读取
+                    int perPageCnt = (int)(cnt / pageCount);//这里不会太大了  int 足矣
+                    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+                    List<Future<Boolean>> futures = new ArrayList<>(perPageCnt);
+                    for (int i = 0; i < perPageCnt; i++) {
+                        long offset = i * pageCount;
+                        Integer size = null;
+                        if (i != perPageCnt - 1) {
+                            size = pageCount;
+                        }
+                        String sqlFinal;
+                        if (size != null) {
+                            sqlFinal = sql + " LIMIT " + offset + "," + size;
+                        } else {
+                            sqlFinal = sql + " LIMIT " + offset + "," + cnt;
+                        }
+                        Future<Boolean> future = executor
+                                .submit(() -> executeSqlImport(dataSource, sqlFinal, mapping, impCount, errMsg,isNeedDelete));
+                        futures.add(future);
+                    }
+
+                    //---------------修改后----------------
+
+                    for (Future<Boolean> future : futures) {
+                        future.get();
+                    }
+
+                    executor.shutdown();
+                } else {
+                    executeSqlImport(dataSource, sql, mapping, impCount, errMsg,isNeedDelete);
+                }
+            } else {
+                logger.info("自动ETL，无需统计记录总条数，直接进行ETL, index: {}", esIndex);
+                executeSqlImport(dataSource, sql, mapping, impCount, errMsg,isNeedDelete);
+            }
+
+            logger.info("数据全量导入完成,一共导入 {} 条数据, 耗时: {}", impCount.get(), System.currentTimeMillis() - start);
+            etlResult.setResultMessage("导入ES索引 " + esIndex + " 数据：" + impCount.get() + " 条");
+        } catch (Exception e) {
+            logger.error(e.getMessage(), e);
+            errMsg.add(esIndex + " etl failed! ==>" + e.getMessage());
+        }
+        if (errMsg.isEmpty()) {
+            etlResult.setSucceeded(true);
+        } else {
+            etlResult.setErrorMessage(Joiner.on("\n").join(errMsg));
+        }
+        return etlResult;
+    }
+
+
+
+    //-----------2019.3.15 leizheng4修改-----------
+    public EtlResult importDataSql(String sql,boolean isNeedDelete,String orderByParam) {
+        EtlResult etlResult = new EtlResult();
+        AtomicLong impCount = new AtomicLong();
+        List<String> errMsg = new ArrayList<>();
+        String esIndex = "";
+        if (config == null) {
+            logger.warn("esSycnCofnig is null, etl go end !");
+            etlResult.setErrorMessage("esSycnCofnig is null, etl go end !");
+            return etlResult;
+        }
+
+        ESMapping mapping = config.getEsMapping();
+
+        esIndex = mapping.get_index();
+        DruidDataSource dataSource = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
+        Pattern pattern = Pattern.compile(".*:(.*)://.*/(.*)\\?.*$");
+        Matcher matcher = pattern.matcher(dataSource.getUrl());
+        if (!matcher.find()) {
+            throw new RuntimeException("Not found the schema of jdbc-url: " + config.getDataSourceKey());
+        }
+        String schema = matcher.group(2);
+
+        logger.info("etl from db: {},  to es index: {}", schema, esIndex);
+        long start = System.currentTimeMillis();
+        ExecutorService executor = null;
+        try {
+            if (logger.isDebugEnabled()) {
+                logger.debug("etl sql : {}", sql);
+            }
+
+            // 直接开启多线程（数据量太大的情况，执行数目语句数据库开始）
+            int fetchCount = 10000;
+            boolean isFirst=true;
+            long maxId = 0L;
+            String readId = orderByParam;
+            if(orderByParam.contains(".")) {
+                readId=orderByParam.substring(orderByParam.indexOf(".")+1,orderByParam.length());
+            }
+
+            List<Future<Boolean>> futures = new ArrayList<>();
+            int threadCount = 10; // TODO 从配置读取
+            executor = Executors.newFixedThreadPool(threadCount);
+            while(fetchCount>0)
+            {
+                String fetchSql ="";
+                if(isFirst)
+                {
+                    fetchSql = sql + " order by "+orderByParam+" limit 0,10000";
+                }else{
+                    if(sql.toLowerCase().contains(" where "))
+                    {
+                        fetchSql = sql + " and " + orderByParam +">"+maxId +" order by "+orderByParam+" limit 0,10000";
+                    }else{
+                        fetchSql = sql + " where " + orderByParam +">"+maxId +" order by "+orderByParam+" limit 0,10000";
+                    }
+                }
+                long startSql = System.currentTimeMillis();
+                List<Map<String, Object>> listFileds = this.getListParamsByOrder(dataSource,fetchSql,mapping,errMsg);
+                isFirst=false;
+                fetchCount = listFileds.size();
+                if(fetchCount!=0){
+                    maxId = (Long)listFileds.get(fetchCount-1).get(readId);
+                }
+
+                logger.info("order by sql:{},maxId:{},耗时: {}", fetchSql,maxId, System.currentTimeMillis() - startSql);
+
+                Future<Boolean> future = executor
+                        .submit(() -> executeEsInsert( mapping,listFileds, impCount, errMsg,isNeedDelete));
+                futures.add(future);
+            }
+            for (Future<Boolean> future : futures) {
+                future.get();
+            }
+            //executor.shutdown();
+            logger.info("数据全量导入完成,一共导入 {} 条数据, 耗时: {}", impCount.get(), System.currentTimeMillis() - start);
+            etlResult.setResultMessage("导入ES索引 " + esIndex + " 数据：" + impCount.get() + " 条");
+        } catch (Exception e) {
+            logger.error(e.getMessage(), e);
+            errMsg.add(esIndex + " etl failed! ==>" + e.getMessage());
+        }finally {
+            if(executor!=null)
+            {
+                executor.shutdown();
+            }
+        }
+        if (errMsg.isEmpty()) {
+            etlResult.setSucceeded(true);
+        } else {
+            etlResult.setErrorMessage(Joiner.on("\n").join(errMsg));
+        }
+        return etlResult;
+    }
+
+
+    private List<Map<String, Object>> getListParamsByOrder(DruidDataSource dataSource,String sql,ESMapping mapping,List<String> errMsg)
+    {
+        return (List<Map<String, Object>>)ESSyncUtil.sqlRS(dataSource, sql, rs -> {
+            List<Map<String, Object>> listFileds = new ArrayList<>();
+            try {
+                while (rs.next()) {
+                    Map<String, Object> esFieldData = new LinkedHashMap<>();
+                    for (FieldItem fieldItem : mapping.getSchemaItem().getSelectFields().values()) {
+
+                        String fieldName = fieldItem.getFieldName();
+                        if (mapping.getSkips().contains(fieldName)) {
+                            continue;
+                        }
+
+                        Object val = esTemplate.getValFromRS(mapping, rs, fieldName, fieldName);
+                        esFieldData.put(fieldName, val);
+                    }
+                    listFileds.add(esFieldData);
+                }
+
+            } catch (Exception e) {
+                logger.error(e.getMessage(), e);
+                errMsg.add(mapping.get_index() + " etl failed! ==>" + e.getMessage());
+                throw new RuntimeException(e);
+            }
+            return listFileds;
+        });
+    }
+
+
+    //-----------2019.3.15 leizheng4修改-----------
+    private boolean executeEsInsert(ESMapping mapping,List<Map<String,Object>> listFields ,AtomicLong impCount,
+                                    List<String> errMsg,boolean isNeedDelete) {
+        try {
+            int count = 0;
+            try {
+                BulkRequestBuilder bulkRequestBuilder = transportClient.prepareBulk();
+
+                long batchBegin = System.currentTimeMillis();
+                for(Map<String,Object> esFieldData:listFields){
+                    Object idVal = null;
+                    if (mapping.get_id() != null) {
+                        //idVal = rs.getObject(mapping.get_id());  idVal= BigInter 报错
+                        idVal = esFieldData.get(mapping.get_id());
+                    }
+
+                    if (idVal != null) {
+                        if (mapping.getParent() == null) {
+                            bulkRequestBuilder.add(transportClient
+                                    .prepareIndex(mapping.get_index(), mapping.get_type(), idVal.toString())
+                                    .setSource(esFieldData));
+                        } else {
+                            // ignore
+                        }
+                    } else {
+                        //idVal = rs.getObject(mapping.getPk());  idVal= BigInter 报错
+                        idVal = esFieldData.get(mapping.getPk());
+                        if (mapping.getParent() == null) {
+                            if(isNeedDelete){
+                                // 删除pk对应的数据
+                                SearchResponse response = transportClient.prepareSearch(mapping.get_index())
+                                        .setTypes(mapping.get_type())
+                                        .setQuery(QueryBuilders.termQuery(mapping.getPk(), idVal))
+                                        .get();
+                                for (SearchHit hit : response.getHits()) {
+                                    bulkRequestBuilder.add(transportClient
+                                            .prepareDelete(mapping.get_index(), mapping.get_type(), hit.getId()));
+                                }
+                            }
+
+                            bulkRequestBuilder
+                                    .add(transportClient.prepareIndex(mapping.get_index(), mapping.get_type())
+                                            .setSource(esFieldData));
+                        } else {
+                            // ignore
+                        }
+                    }
+
+                    if (bulkRequestBuilder.numberOfActions() % mapping.getCommitBatch() == 0
+                            && bulkRequestBuilder.numberOfActions() > 0) {
+                        long esBatchBegin = System.currentTimeMillis();
+                        BulkResponse rp = bulkRequestBuilder.execute().actionGet();
+                        if (rp.hasFailures()) {
+                            this.processFailBulkResponse(rp, Objects.nonNull(mapping.getParent()));
+                        }
+
+                        if (logger.isDebugEnabled()) {
+                            logger.debug("全量数据批量导入批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
+                                    (System.currentTimeMillis() - batchBegin),
+                                    (System.currentTimeMillis() - esBatchBegin),
+                                    bulkRequestBuilder.numberOfActions(),
+                                    mapping.get_index());
+                        }
+                        batchBegin = System.currentTimeMillis();
+                        bulkRequestBuilder = transportClient.prepareBulk();
+                    }
+                    count++;
+                    impCount.incrementAndGet();
+                }
+
+                if (bulkRequestBuilder.numberOfActions() > 0) {
+                    long esBatchBegin = System.currentTimeMillis();
+                    BulkResponse rp = bulkRequestBuilder.execute().actionGet();
+                    if (rp.hasFailures()) {
+                        this.processFailBulkResponse(rp, Objects.nonNull(mapping.getParent()));
+                    }
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("全量数据批量导入最后批次耗时: {}, es执行时间: {}, 批次大小: {}, index; {}",
+                                (System.currentTimeMillis() - batchBegin),
+                                (System.currentTimeMillis() - esBatchBegin),
+                                bulkRequestBuilder.numberOfActions(),
+                                mapping.get_index());
+                    }
+                }
+            } catch (Exception e) {
+                logger.error(e.getMessage(), e);
+                errMsg.add(mapping.get_index() + " etl failed! ==>" + e.getMessage());
+                throw new RuntimeException(e);
+            }
             return true;
         } catch (Exception e) {
             logger.error(e.getMessage(), e);

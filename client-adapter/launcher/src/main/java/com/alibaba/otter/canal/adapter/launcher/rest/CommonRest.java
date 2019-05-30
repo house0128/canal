@@ -5,6 +5,8 @@ import java.util.*;
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 
+import com.alibaba.otter.canal.adapter.launcher.common.MetricsInfo;
+import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
@@ -205,5 +207,143 @@ public class CommonRest {
         Map<String, String> res = new LinkedHashMap<>();
         res.put("stauts", resStatus);
         return res;
+    }
+
+    //-----------2019.3.7 leizheng4修改-----------
+    /**
+     * ETL curl http://127.0.0.1:8081/etlEx/es/mytest_user.yml?sql=select%20id,name,age%20from%20user&isNeedDelete=false -X POST
+     *
+     * @param type 类型 hbase, es
+     * @param key adapter key
+     * @param task 任务名对应配置文件名 mytest_user.yml
+     * @param sql 要执行ELT的语句
+     * @param isNeedDelete 在插入es是否需要判断执行删除es逻辑
+     */
+    @PostMapping("/etlEx/{type}/{task}")
+//    public EtlResult etlEx(@PathVariable String type, @PathVariable String task,
+//                         @RequestParam(name = "sql", required = true) String sql,@RequestParam(name = "isDelete", required = true) boolean isNeedDelete) {
+    public EtlResult etlEx(@PathVariable String type, @PathVariable String task,
+                           @RequestParam(name = "sql", required = true) String sql,@RequestParam(name = "isNeedDelete", required = true) boolean isNeedDelete ) {
+        OuterAdapter adapter = loader.getExtension(type, null);
+        String destination = adapter.getDestination(task);
+        String lockKey = destination == null ? task : destination;
+
+        boolean locked = etlLock.tryLock(ETL_LOCK_ZK_NODE + type + "-" + lockKey);
+        if (!locked) {
+            EtlResult result = new EtlResult();
+            result.setSucceeded(false);
+            result.setErrorMessage(task + " 有其他进程正在导入中, 请稍后再试");
+            return result;
+        }
+        try {
+
+            Boolean oriSwitchStatus;
+            if (destination != null) {
+                oriSwitchStatus = syncSwitch.status(destination);
+                if (oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.off(destination);
+                }
+            } else {
+                // task可能为destination，直接锁task
+                oriSwitchStatus = syncSwitch.status(task);
+                if (oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.off(task);
+                }
+            }
+            try {
+                if (StringUtils.isNotBlank(sql)) {
+                    return  adapter.etlEx(task,sql,isNeedDelete);
+                }
+
+                EtlResult etlResult = new EtlResult();
+                etlResult.setSucceeded(false);
+                etlResult.setErrorMessage("need send sql");
+                return etlResult;
+            } finally {
+                if (destination != null && oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.on(destination);
+                } else if (destination == null && oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.on(task);
+                }
+            }
+        } finally {
+            etlLock.unlock(ETL_LOCK_ZK_NODE + type + "-" + lockKey);
+        }
+    }
+
+
+
+    //-----------2019.3.15 leizheng4修改-----------
+    /**
+     * ETL curl http://127.0.0.1:8081/etlOrder/es/mytest_user.yml?sql=select%20id,name,age%20from%20user&isNeedDelete=false -X POST
+     *
+     * @param type 类型 hbase, es
+     * @param key adapter key
+     * @param task 任务名对应配置文件名 mytest_user.yml
+     * @param sql 要执行ELT的语句
+     * @param isNeedDelete 在插入es是否需要判断执行删除es逻辑
+     * @param orderByParam 插入的排序字段
+     */
+    @PostMapping("/etlOrder/{type}/{task}")
+//    public EtlResult etlEx(@PathVariable String type, @PathVariable String task,
+//                         @RequestParam(name = "sql", required = true) String sql,@RequestParam(name = "isDelete", required = true) boolean isNeedDelete) {
+    public EtlResult etlOrder(@PathVariable String type, @PathVariable String task,
+                              @RequestParam(name = "sql", required = true) String sql,@RequestParam(name = "isNeedDelete", required = true) boolean isNeedDelete,@RequestParam(name = "orderBy", required = true) String orderByParam) {
+        OuterAdapter adapter = loader.getExtension(type, null);
+        String destination = adapter.getDestination(task);
+        String lockKey = destination == null ? task : destination;
+
+        boolean locked = etlLock.tryLock(ETL_LOCK_ZK_NODE + type + "-" + lockKey);
+        if (!locked) {
+            EtlResult result = new EtlResult();
+            result.setSucceeded(false);
+            result.setErrorMessage(task + " 有其他进程正在导入中, 请稍后再试");
+            return result;
+        }
+        try {
+
+            Boolean oriSwitchStatus;
+            if (destination != null) {
+                oriSwitchStatus = syncSwitch.status(destination);
+                if (oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.off(destination);
+                }
+            } else {
+                // task可能为destination，直接锁task
+                oriSwitchStatus = syncSwitch.status(task);
+                if (oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.off(task);
+                }
+            }
+            try {
+                if (StringUtils.isNotBlank(sql)) {
+                    return  adapter.etlOrder(task,sql,isNeedDelete,orderByParam);
+                }
+
+                EtlResult etlResult = new EtlResult();
+                etlResult.setSucceeded(false);
+                etlResult.setErrorMessage("need send sql");
+                return etlResult;
+            } finally {
+                if (destination != null && oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.on(destination);
+                } else if (destination == null && oriSwitchStatus != null && oriSwitchStatus) {
+                    syncSwitch.on(task);
+                }
+            }
+        } finally {
+            etlLock.unlock(ETL_LOCK_ZK_NODE + type + "-" + lockKey);
+        }
+    }
+
+
+    //-----------2019.4.4 leizheng4修改-----------
+    /**
+     * ETL curl http://127.0.0.1:8081/metrics -X POST
+     * 返回mertics统计信息
+     */
+    @PostMapping("/metrics")
+    public String metrics() {
+        return MetricsInfo.getInstance().toString();
     }
 }

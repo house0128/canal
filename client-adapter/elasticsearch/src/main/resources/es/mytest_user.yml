@@ -6,6 +6,8 @@ esMapping:
   _type: _doc
   _id: _id
   upsert: true
+  ignoreRightInsert: true
+  threadKeys: {user: role_id,role: id}
 #  pk: id
   sql: "select a.id as _id, a.name as _name, a.role_id as _role_id, b.role_name as _role_name,
         a.c_time as _c_time from user a
@@ -13,4 +15,5 @@ esMapping:
 #  objFields:
 #    _labels: array:;
   etlCondition: "where a.c_time>='{0}'"
+  optimisticLockReverseSearch: true
   commitBatch: 3000

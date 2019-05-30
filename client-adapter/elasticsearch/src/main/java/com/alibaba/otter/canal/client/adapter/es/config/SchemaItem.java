@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig.ESMapping;
+import org.apache.commons.lang.StringUtils;
 
 /**
  * ES 映射配置视图
@@ -57,11 +58,6 @@ public class SchemaItem {
         this.selectFields = selectFields;
     }
 
-    public String toSql() {
-        // todo
-        return null;
-    }
-
     public Map<String, List<TableItem>> getTableItemAliases() {
         if (tableItemAliases == null) {
             synchronized (SchemaItem.class) {
@@ -69,7 +65,7 @@ public class SchemaItem {
                     tableItemAliases = new LinkedHashMap<>();
                     aliasTableItems.forEach((alias, tableItem) -> {
                         List<TableItem> aliases = tableItemAliases
-                            .computeIfAbsent(tableItem.getTableName().toLowerCase(), k -> new ArrayList<>());
+                                .computeIfAbsent(tableItem.getTableName().toLowerCase(), k -> new ArrayList<>());
                         aliases.add(tableItem);
                     });
                 }
@@ -78,28 +74,47 @@ public class SchemaItem {
         return tableItemAliases;
     }
 
+    public String getAliasesName(String tableName){
+        String aliasesTableName = "";
+        synchronized (SchemaItem.class) {
+            if (tableItemAliases != null) {
+                for(Map.Entry<String,List<TableItem>> entry: tableItemAliases.entrySet())
+                {
+                    for(TableItem tableItem:entry.getValue())
+                    {
+                        if(StringUtils.equals(tableItem.getTableName(),tableName))
+                        {
+                            return  tableItem.getAlias();
+                        }
+                    }
+                }
+            }
+        }
+        return aliasesTableName;
+    }
+
     public Map<String, List<FieldItem>> getColumnFields() {
         if (columnFields == null) {
             synchronized (SchemaItem.class) {
                 if (columnFields == null) {
                     columnFields = new LinkedHashMap<>();
                     getSelectFields()
-                        .forEach((fieldName, fieldItem) -> fieldItem.getColumnItems().forEach(columnItem -> {
-                            // TableItem tableItem = getAliasTableItems().get(columnItem.getOwner());
-                            // if (!tableItem.isSubQuery()) {
-                            List<FieldItem> fieldItems = columnFields.computeIfAbsent(
-                                columnItem.getOwner() + "." + columnItem.getColumnName(),
-                                k -> new ArrayList<>());
-                            fieldItems.add(fieldItem);
-                            // } else {
-                            // tableItem.getSubQueryFields().forEach(subQueryField -> {
-                            // List<FieldItem> fieldItems = columnFields.computeIfAbsent(
-                            // columnItem.getOwner() + "." + subQueryField.getColumn().getColumnName(),
-                            // k -> new ArrayList<>());
-                            // fieldItems.add(fieldItem);
-                            // });
-                            // }
-                        }));
+                            .forEach((fieldName, fieldItem) -> fieldItem.getColumnItems().forEach(columnItem -> {
+                                TableItem tableItem = getAliasTableItems().get(columnItem.getOwner());
+                                // if (!tableItem.isSubQuery()) {
+                                List<FieldItem> fieldItems = columnFields.computeIfAbsent(
+                                        columnItem.getOwner() + "." + columnItem.getColumnName(),
+                                        k -> new ArrayList<>());
+                                fieldItems.add(fieldItem);
+                                // } else {
+                                // tableItem.getSubQueryFields().forEach(subQueryField -> {
+                                // List<FieldItem> fieldItems = columnFields.computeIfAbsent(
+                                // columnItem.getOwner() + "." + subQueryField.getColumn().getColumnName(),
+                                // k -> new ArrayList<>());
+                                // fieldItems.add(fieldItem);
+                                // });
+                                // }
+                            }));
                 }
             }
         }
@@ -252,18 +267,18 @@ public class SchemaItem {
 
                             if (currentTableRelField != null) {
                                 List<FieldItem> selectFieldItem = getSchemaItem().getColumnFields()
-                                    .get(leftFieldItem.getOwner() + "." + leftFieldItem.getColumn().getColumnName());
+                                        .get(leftFieldItem.getOwner() + "." + leftFieldItem.getColumn().getColumnName());
                                 if (selectFieldItem != null && !selectFieldItem.isEmpty()) {
                                     relationTableFields.put(currentTableRelField, selectFieldItem);
                                 } else {
                                     selectFieldItem = getSchemaItem().getColumnFields()
-                                        .get(rightFieldItem.getOwner() + "."
-                                             + rightFieldItem.getColumn().getColumnName());
+                                            .get(rightFieldItem.getOwner() + "."
+                                                    + rightFieldItem.getColumn().getColumnName());
                                     if (selectFieldItem != null && !selectFieldItem.isEmpty()) {
                                         relationTableFields.put(currentTableRelField, selectFieldItem);
                                     } else {
                                         throw new UnsupportedOperationException(
-                                            "Relation condition column must in select columns.");
+                                                "Relation condition column must in select columns.");
                                     }
                                 }
                             }
@@ -321,7 +336,6 @@ public class SchemaItem {
     public static class FieldItem {
 
         private String           fieldName;
-        private String           expr;
         private List<ColumnItem> columnItems = new ArrayList<>();
         private List<String>     owners      = new ArrayList<>();
 
@@ -334,14 +348,6 @@ public class SchemaItem {
 
         public void setFieldName(String fieldName) {
             this.fieldName = fieldName;
-        }
-
-        public String getExpr() {
-            return expr;
-        }
-
-        public void setExpr(String expr) {
-            this.expr = expr;
         }
 
         public List<ColumnItem> getColumnItems() {

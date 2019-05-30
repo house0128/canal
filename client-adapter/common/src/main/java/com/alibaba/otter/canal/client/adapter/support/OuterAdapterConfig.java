@@ -20,6 +20,10 @@ public class OuterAdapterConfig {
 
     private Map<String, String> properties; // 其余参数, 可填写适配器中的所需的配置信息
 
+    private boolean            mergeUpdate; //是否开启合并update
+
+    private int threadCount; //处理的线程数
+
     public String getName() {
         return name;
     }
@@ -58,5 +62,21 @@ public class OuterAdapterConfig {
 
     public void setZkHosts(String zkHosts) {
         this.zkHosts = zkHosts;
+    }
+
+    public boolean isMergeUpdate() {
+        return mergeUpdate;
+    }
+
+    public void setMergeUpdate(boolean mergeUpdate) {
+        this.mergeUpdate = mergeUpdate;
+    }
+
+    public int getThreadCount() {
+        return threadCount;
+    }
+
+    public void setThreadCount(int threadCount) {
+        this.threadCount = threadCount;
     }
 }
